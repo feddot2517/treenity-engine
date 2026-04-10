@@ -1,7 +1,7 @@
 // Treenity MCP Server — exposes tree store as MCP tools
 // StreamableHTTP transport, stateless, token auth via ?token= or Authorization header
 
-// requestApproval kept in guardian.ts for Agent SDK path
+import { requestApproval, resolveVerdict } from '#agent/guardian';
 import { AiPolicy } from '#agent/types';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -52,34 +52,28 @@ export function buildSubjects(req: GuardianRequest): string[] {
 
 export async function checkMcpGuardian(store: Tree, req: GuardianRequest): Promise<McpGuardianResult> {
   try {
-    const guardianNode = await store.get('/agents/guardian');
-    if (!guardianNode) return { allowed: false, reason: 'no Guardian configured at /agents/guardian — all writes denied' };
+    const guardianNode = await store.get('/guardian');
+    if (!guardianNode) return { allowed: false, reason: 'no Guardian configured at /guardian — all writes denied' };
 
     const policy = getComponent(guardianNode, AiPolicy);
     if (!policy || policy.$type !== 'ai.policy') return { allowed: false, reason: 'invalid Guardian policy type — writes denied' };
 
-    const allow = (policy.allow as string[]) ?? [];
-    const deny = (policy.deny as string[]) ?? [];
-    const escalate = (policy.escalate as string[]) ?? [];
+    const policyData = {
+      allow: (policy.allow as string[]) ?? [],
+      deny: (policy.deny as string[]) ?? [],
+      escalate: (policy.escalate as string[]) ?? [],
+    };
     const subjects = buildSubjects(req);
 
-    // Deny: if ANY subject matches deny → blocked
-    for (const s of subjects) {
-      if (matchesAny(deny, s)) return { allowed: false, reason: `denied by Guardian: ${s}` };
-    }
+    // Shared specificity-aware resolution (same as agent guardian)
+    const verdict = resolveVerdict(policyData, subjects);
 
-    // Allow: if ANY subject matches allow → permitted
-    for (const s of subjects) {
-      if (matchesAny(allow, s)) return { allowed: true };
+    if (verdict === 'deny') {
+      const denied = subjects.find(s => matchesAny(policyData.deny, s)) ?? subjects[0];
+      return { allowed: false, reason: `denied by Guardian: ${denied}` };
     }
-
-    // Escalate or unknown: return prompt with ALL subjects for user to choose granularity
-    for (const s of subjects) {
-      if (matchesAny(escalate, s)) {
-        return { allowed: 'prompt', subjects, args: req.args };
-      }
-    }
-
+    if (verdict === 'allow') return { allowed: true };
+    // escalate or unknown → prompt human
     return { allowed: 'prompt', subjects, args: req.args };
   } catch (err) {
     console.error('[mcp-guardian] policy check failed:', err);
@@ -138,26 +132,21 @@ function subjectLabel(subject: string): string {
   return `all ${parts[0]} calls`;
 }
 
-/** Check guardian and return MCP response if blocked or needs approval */
-function guardBlock(guard: McpGuardianResult) {
+/** Check guardian and block until human approves via ai.approval node */
+async function guardBlock(guard: McpGuardianResult, store: Tree, userId: string) {
   if (guard.allowed === true) return null;
   if (guard.allowed === false) return text(`🛑 Guardian: ${guard.reason}`);
 
-  // Structured poll — agent presents to user via AskUserQuestion, then calls guardian_approve
-  const poll = {
-    type: 'guardian_poll',
-    question: `Agent wants to call: ${guard.subjects[0].replace('mcp__treenity__', '')}`,
-    hint: 'Ask user via AskUserQuestion → guardian_approve({ pattern }) → retry.',
-    args: guard.args,
-    options: [
-      ...guard.subjects.map(s => ({
-        label: subjectLabel(s),
-        pattern: s,
-      })),
-      { label: 'Deny', pattern: null },
-    ],
-  };
-  return text(JSON.stringify(poll));
+  const tool = guard.subjects[0] ?? 'unknown';
+  const input = JSON.stringify(guard.args);
+  const approved = await requestApproval(store, {
+    agentPath: `/agents/mcp:${userId}`,
+    role: 'mcp',
+    tool,
+    input,
+    reason: `MCP escalation: ${tool.replace('mcp__treenity__', '')}`,
+  });
+  return approved ? null : text(`🛑 Guardian: denied by human`);
 }
 
 const catalog = new TypeCatalog();
@@ -167,8 +156,16 @@ function dataKeys(node: Record<string, unknown>) {
 }
 
 export async function buildMcpServer(store: Tree, session: Session, claims?: string[]) {
-  claims ??= await buildClaims(store, session.userId);
+  claims ??= session.claims ?? await buildClaims(store, session.userId);
+  const root = await store.get('/');
+  console.log(`[mcp-diag] userId=${session.userId}, claims=[${claims}], root.$acl=${JSON.stringify(root?.$acl)}`);
   const aclStore = withAcl(store, session.userId, claims);
+
+  /** Check guardian policy; block on escalation until human approves */
+  async function guarded(tool: string, args: Record<string, unknown>) {
+    const guard = await checkMcpGuardian(store, { tool, args });
+    return guardBlock(guard, store, session.userId);
+  }
 
   const mcp = new McpServer({ name: 'treenity', version: '1.0.0' });
 
@@ -243,8 +240,7 @@ export async function buildMcpServer(store: Tree, session: Session, claims?: str
       },
     },
     async ({ path, type, components, acl, owner }) => {
-      const guard = await checkMcpGuardian(store, { tool: 'set_node', args: { path, type, components, acl, owner } });
-      const blocked = guardBlock(guard);
+      const blocked = await guarded('set_node', { path, type, components, acl, owner });
       if (blocked) return blocked;
       const existing = await aclStore.get(path);
       const node = existing ?? createNode(path, type);
@@ -282,8 +278,7 @@ export async function buildMcpServer(store: Tree, session: Session, claims?: str
       },
     },
     async ({ path, action, type, key, data }) => {
-      const guard = await checkMcpGuardian(store, { tool: 'execute', args: { path, action, type, key, data } });
-      const blocked = guardBlock(guard);
+      const blocked = await guarded('execute', { path, action, type, key, data });
       if (blocked) return blocked;
       const result = await executeAction(aclStore, path, type, key, action, data);
       return text(yaml(result ?? { ok: true }));
@@ -301,8 +296,7 @@ export async function buildMcpServer(store: Tree, session: Session, claims?: str
       },
     },
     async ({ source, target, allowAbsolute }) => {
-      const guard = await checkMcpGuardian(store, { tool: 'deploy_prefab', args: { source, target, allowAbsolute } });
-      const blocked = guardBlock(guard);
+      const blocked = await guarded('deploy_prefab', { source, target, allowAbsolute });
       if (blocked) return blocked;
       const result = await deployPrefab(aclStore, source, target, { allowAbsolute });
       return text(yaml(result));
@@ -339,8 +333,7 @@ export async function buildMcpServer(store: Tree, session: Session, claims?: str
       inputSchema: { path: z.string() },
     },
     async ({ path }) => {
-      const guard = await checkMcpGuardian(store, { tool: 'remove_node', args: { path } });
-      const blocked = guardBlock(guard);
+      const blocked = await guarded('remove_node', { path });
       if (blocked) return blocked;
       const ok = await aclStore.remove(path);
       return text(ok ? `removed: ${path}` : `not found: ${path}`);
@@ -377,31 +370,6 @@ export async function buildMcpServer(store: Tree, session: Session, claims?: str
       inputSchema: { query: z.string().describe('Search keyword, e.g. "order", "mail", "contact"') },
     },
     async ({ query }) => text(yaml(catalog.search(query))),
-  );
-
-  // ── Guardian approval — lets the agent ask user and grant access ──
-
-  mcp.registerTool(
-    'guardian_approve',
-    {
-      description: 'Add a pattern to the Guardian allow list. Use when a previous tool call returned "Requires approval". The user must confirm before calling this.',
-      inputSchema: {
-        pattern: z.string().describe('The subject pattern to allow, e.g. "mcp__treenity__execute:run"'),
-      },
-    },
-    async ({ pattern }) => {
-      const guardianNode = await store.get('/agents/guardian');
-      if (!guardianNode) return text('🛑 No guardian node at /agents/guardian');
-      const policy = getComponent(guardianNode, AiPolicy);
-      if (!policy || policy.$type !== 'ai.policy') return text('🛑 Invalid guardian policy');
-
-      if (policy.allow.includes(pattern)) return text(`Already allowed: ${pattern}`);
-
-      policy.allow.push(pattern);
-      policy.escalate = policy.escalate.filter((e: string) => e !== pattern);
-      await store.set(guardianNode);
-      return text(`✅ Allowed: ${pattern}`);
-    },
   );
 
   return mcp;

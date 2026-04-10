@@ -1,0 +1,50 @@
+{
+  "type": "object",
+  "properties": {
+    "taskRef": {
+      "type": "string",
+      "title": "Reference to board task",
+      "default": ""
+    },
+    "prompt": {
+      "type": "string",
+      "format": "textarea",
+      "default": ""
+    },
+    "result": {
+      "type": "string",
+      "format": "textarea",
+      "default": ""
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "plan",
+        "work",
+        "discuss",
+        "chat"
+      ],
+      "default": "work"
+    },
+    "queryKey": {
+      "type": "string",
+      "title": "Key used by invokeClaude — needed to abort the correct query",
+      "default": ""
+    }
+  },
+  "required": [
+    "taskRef",
+    "prompt",
+    "result",
+    "mode",
+    "queryKey"
+  ],
+  "methods": {
+    "stop": {
+      "description": "Stop the running task",
+      "arguments": []
+    }
+  },
+  "$id": "ai.run",
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

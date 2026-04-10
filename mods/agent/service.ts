@@ -4,17 +4,31 @@
 // Deterministic routing — no LLM tokens burned on orchestration.
 
 import { invokeClaude } from '#metatron/claude';
-import { MetatronConfig } from '#metatron/types';
 import { type Class, type ComponentData, createNode, getComponent, type NodeData, register } from '@treenity/core';
 import { setComponent } from '@treenity/core/comp';
 import type { ServiceCtx } from '@treenity/core/contexts/service';
 import { createLogger } from '@treenity/core/log';
 import type { ActionCtx } from '@treenity/core/server/actions';
 import { debouncedWrite } from '@treenity/core/util/debounced-write';
+import dayjs from 'dayjs';
 import { buildPermissionRules, createCanUseTool, reconcileOnStartup } from './guardian';
-import { AiAgent, AiAssignment, AiPlan, AiPool, AiThread, type ThreadMessage } from './types';
+import {
+  AiAgent,
+  AiAssignment,
+  AiChat,
+  AiCost,
+  AiLog,
+  AiPlan,
+  AiPool,
+  AiRunStatus,
+  AiThread,
+  type LogEntry,
+  type ThreadMessage,
+} from './types';
 
 const log = createLogger('agent-office');
+
+const makeRunId = () => `r-${dayjs().format('YYMMDD-HHmmss')}-${Math.random().toString(36).slice(2, 5)}`;
 
 const MAX_OCC_RETRIES = 3;
 
@@ -72,12 +86,15 @@ function buildWorkPrompt(role: string, task: NodeData, agent: NodeData, cursor: 
   const title = task.title || '(untitled)';
   const desc = task.description || '';
 
-  const config = getComponent(agent, MetatronConfig);
-  if (!config) throw new Error(`agent ${agent.$path} missing metatron.config component`);
-
-  const base = config.systemPrompt
-    ? String(config.systemPrompt)
+  const agentComp = getComponent(agent, AiAgent);
+  const base = agentComp?.systemPrompt
+    ? String(agentComp.systemPrompt)
     : `You are a ${role} agent for the Treenity project.`;
+
+  // Include org.post hat if agent lives on an org.post node
+  const hat = agent.$type === 'org.post' && typeof agent.hat === 'string' && agent.hat
+    ? `\n## Hat\n${agent.hat}\n`
+    : '';
 
   const plan = getComponent(task, AiPlan);
   const planSection = plan?.text && plan.approved
@@ -85,7 +102,7 @@ function buildWorkPrompt(role: string, task: NodeData, agent: NodeData, cursor: 
     : '';
 
   return `${base}
-
+${hat}
 ## Current Task
 **${title}**
 ${desc}
@@ -119,12 +136,14 @@ function buildPlanPrompt(role: string, task: NodeData, agent: NodeData, cursor: 
   const title = task.title || '(untitled)';
   const desc = task.description || '';
 
-  const config = getComponent(agent, MetatronConfig);
-  if (!config) throw new Error(`agent ${agent.$path} missing metatron.config component`);
-
-  const base = config.systemPrompt
-    ? String(config.systemPrompt)
+  const agentComp = getComponent(agent, AiAgent);
+  const base = agentComp?.systemPrompt
+    ? String(agentComp.systemPrompt)
     : `You are a ${role} agent for the Treenity project.`;
+
+  const hat = agent.$type === 'org.post' && typeof agent.hat === 'string' && agent.hat
+    ? `\n## Hat\n${agent.hat}\n`
+    : '';
 
   const plan = getComponent(task, AiPlan);
   const prevPlanSection = plan?.text && plan.feedback
@@ -135,7 +154,7 @@ function buildPlanPrompt(role: string, task: NodeData, agent: NodeData, cursor: 
     : '';
 
   return `${base}
-
+${hat}
 ## Task — PLAN ONLY
 **${title}**
 ${desc}
@@ -232,7 +251,7 @@ async function discussAgent(
   }
 }
 
-// ── Work runner (full agent → metatron.task with live streaming) ──
+// ── Work runner (full agent → ai.run with live streaming) ──
 
 async function runAgent(
   agentNode: NodeData,
@@ -243,88 +262,99 @@ async function runAgent(
   const agent = getComponent(agentNode, AiAgent);
   if (!agent) throw new Error(`not an ai.agent: ${agentNode.$path}`);
 
-  const config = getComponent(agentNode, MetatronConfig);
-  if (!config) throw new Error(`agent ${agentNode.$path} missing metatron.config component`);
-
   const role = agent.role;
+  const chat = getComponent(agentNode, AiChat);
   const assignment = getComponent(taskNode, AiAssignment);
   const cursor = assignment?.cursors?.[agentNode.$path] ?? 0;
   const prompt = buildWorkPrompt(role, taskNode, agentNode, cursor);
   const permissionRules = buildPermissionRules(role);
   const canUseTool = createCanUseTool(role, agentNode.$path, store);
 
-  // Create metatron.task for live streaming + structured log (D29)
-  const taskId = `t-${Date.now()}`;
-  const mtTaskPath = `${agentNode.$path}/tasks/${taskId}`;
+  // Create ai.run with ECS components for structured observability
+  const runId = makeRunId();
+  const runPath = `${agentNode.$path}/runs/${runId}`;
 
-  await store.set(createNode(mtTaskPath, 'metatron.task', {
+  const queryKey = agentNode.$path;
+  const runNode = createNode(runPath, 'ai.run', {
+    taskRef: taskNode.$path,
     prompt,
-    status: 'running',
-    createdAt: Date.now(),
-  }));
+    result: '',
+    mode: 'work' as const,
+    queryKey,
+  });
+  setComponent(runNode, AiRunStatus, { status: 'running', startedAt: Date.now(), finishedAt: 0, error: '' });
+  setComponent(runNode, AiLog, { entries: [] });
+  setComponent(runNode, AiCost, { inputTokens: 0, outputTokens: 0, costUsd: 0, model: agent.model || '' });
+  await store.set(runNode);
 
-  // Save taskRef on agent + board task for UI linkage
+  // Save currentRun on agent + board task for UI linkage
   await updateComp(store, agentNode.$path, AiAgent, (c) => {
-    c.taskRef = mtTaskPath;
+    c.currentRun = runPath;
   });
   await updateNode(store, taskNode.$path, (n) => {
-    n.taskRef = mtTaskPath;
+    n.currentRun = runPath;
   });
 
-  log.info(`work: ${role} agent ${agentNode.$path} on task ${taskNode.$path} → ${mtTaskPath}`);
+  log.info(`work: ${role} agent ${agentNode.$path} on task ${taskNode.$path} → ${runPath}`);
 
-  // Streaming progress — debounced writes to metatron.task.log every 2s
-  let tailBuf = '';
+  // Streaming progress — debounced writes to ai.log.entries every 2s
+  const streamEntries: LogEntry[] = [];
   const progress = debouncedWrite(async () => {
-    const t = await store.get(mtTaskPath);
-    if (t && t.status === 'running') {
-      const { $rev: _, ...rest } = t;
-      await store.set({ ...rest, log: tailBuf });
-    }
+    await updateNode(store, runPath, (n) => {
+      const logComp = getComponent(n, AiLog);
+      if (logComp) logComp.entries = [...streamEntries];
+    });
   }, 2000, 'agent.progress');
 
-  const onOutput = (chunk: string) => {
-    tailBuf += chunk;
+  const onLogEntry = (entry: LogEntry) => {
+    streamEntries.push(entry);
     progress.trigger();
   };
 
   try {
     const result = await invokeClaude(prompt, {
       key: agentNode.$path,
-      sessionId: config.sessionId || undefined,
-      model: config.model || undefined,
+      sessionId: chat?.sessionId || undefined,
+      model: agent.model || undefined,
       permissionRules,
       canUseTool,
-      onOutput,
+      onLogEntry,
     });
 
     progress.cancel();
 
-    // Finalize metatron.task
-    const finalStatus = result.aborted ? 'done' : result.error ? 'error' : 'done';
-    const mtTask = await store.get(mtTaskPath);
-    if (mtTask) {
-      await store.set({
-        ...mtTask,
-        status: finalStatus,
-        log: result.output,
-        result: result.aborted
-          ? (result.text || '[interrupted]')
-          : (result.text || result.output),
-      });
-    }
+    // Finalize ai.run — update all ECS components
+    const finalStatus = result.aborted ? 'aborted' : result.error ? 'error' : 'done';
+    await updateNode(store, runPath, (n) => {
+      n.result = result.aborted
+        ? (result.text || '[interrupted]')
+        : (result.text || result.output);
 
-    // Save sessionId to metatron.config on agent node
+      const logComp = getComponent(n, AiLog);
+      if (logComp) logComp.entries = result.logEntries;
+
+      const statusComp = getComponent(n, AiRunStatus);
+      if (statusComp) {
+        statusComp.status = finalStatus;
+        statusComp.finishedAt = Date.now();
+        if (result.error) statusComp.error = result.text || 'unknown error';
+      }
+
+      const costComp = getComponent(n, AiCost);
+      if (costComp) costComp.costUsd = result.costUsd ?? 0;
+    });
+
+    // Save sessionId to ai.chat on agent node
     await updateNode(store, agentNode.$path, (n) => {
-      const cfg = getComponent(n, MetatronConfig);
-      if (cfg) cfg.sessionId = result.sessionId ?? '';
+      const c = getComponent(n, AiChat);
+      if (c) c.sessionId = result.sessionId ?? '';
     });
 
     // Update agent: complete
     await updateComp(store, agentNode.$path, AiAgent, (c) => {
       c.status = 'idle';
       c.currentTask = '';
-      c.taskRef = '';
+      c.currentRun = '';
       c.lastRunAt = Date.now();
       c.totalTokens = (c.totalTokens || 0) + (result.costUsd ? Math.round(result.costUsd * 100000) : 0);
     });
@@ -356,16 +386,23 @@ async function runAgent(
 
     progress.cancel();
 
-    // Mark metatron.task as error
-    const mtTask = await store.get(mtTaskPath);
-    if (mtTask) {
-      await store.set({ ...mtTask, status: 'error', log: tailBuf, result: `Error: ${stack}` });
-    }
+    // Mark ai.run as error
+    await updateNode(store, runPath, (n) => {
+      n.result = `Error: ${stack}`;
+      const logComp = getComponent(n, AiLog);
+      if (logComp) logComp.entries = [...streamEntries, { ts: Date.now(), type: 'text' as const, output: `Error: ${stack}` }];
+      const statusComp = getComponent(n, AiRunStatus);
+      if (statusComp) {
+        statusComp.status = 'error';
+        statusComp.finishedAt = Date.now();
+        statusComp.error = stack;
+      }
+    });
 
     await updateComp(store, agentNode.$path, AiAgent, (c) => {
       c.status = 'error';
       c.currentTask = '';
-      c.taskRef = '';
+      c.currentRun = '';
     });
 
     await updateNode(store, taskNode.$path, (n) => {
@@ -392,33 +429,63 @@ async function planAgent(
   const agent = getComponent(agentNode, AiAgent);
   if (!agent) throw new Error(`not an ai.agent: ${agentNode.$path}`);
 
-  const config = getComponent(agentNode, MetatronConfig);
-  if (!config) throw new Error(`agent ${agentNode.$path} missing metatron.config component`);
-
   const role = agent.role;
+  const chat = getComponent(agentNode, AiChat);
   const assignment = getComponent(taskNode, AiAssignment);
   const cursor = assignment?.cursors?.[agentNode.$path] ?? 0;
   const prompt = buildPlanPrompt(role, taskNode, agentNode, cursor);
 
-  // Plan mode uses read-only tools only — no writes, no execution
-  const canUseTool = createCanUseTool(role, agentNode.$path, store);
+  // Plan mode: policy-enforced read-only (not just prompt-constrained)
+  const canUseTool = createCanUseTool(role, agentNode.$path, store, { readOnly: true });
 
-  log.info(`plan: ${role} agent ${agentNode.$path} planning for ${taskNode.$path}`);
+  // Create ai.run for plan mode — same ECS observability as work mode
+  const runId = makeRunId();
+  const runPath = `${agentNode.$path}/runs/${runId}`;
+
+  const queryKey = `plan:${agentNode.$path}`;
+  const runNode = createNode(runPath, 'ai.run', {
+    taskRef: taskNode.$path,
+    prompt,
+    result: '',
+    mode: 'plan' as const,
+    queryKey,
+  });
+  setComponent(runNode, AiRunStatus, { status: 'running', startedAt: Date.now(), finishedAt: 0, error: '' });
+  setComponent(runNode, AiLog, { entries: [] });
+  setComponent(runNode, AiCost, { inputTokens: 0, outputTokens: 0, costUsd: 0, model: agent.model || '' });
+  await store.set(runNode);
+
+  await updateComp(store, agentNode.$path, AiAgent, (c) => {
+    c.currentRun = runPath;
+  });
+
+  log.info(`plan: ${role} agent ${agentNode.$path} planning for ${taskNode.$path} → ${runPath}`);
 
   try {
     const result = await invokeClaude(prompt, {
       key: `plan:${agentNode.$path}`,
-      sessionId: config.sessionId || undefined,
-      model: config.model || undefined,
+      sessionId: chat?.sessionId || undefined,
+      model: agent.model || undefined,
       canUseTool,
     });
 
     const planText = (result.text || result.output || '').trim();
 
-    // Save sessionId
+    // Finalize ai.run
+    await updateNode(store, runPath, (n) => {
+      n.result = planText;
+      const statusComp = getComponent(n, AiRunStatus);
+      if (statusComp) { statusComp.status = 'done'; statusComp.finishedAt = Date.now(); }
+      const costComp = getComponent(n, AiCost);
+      if (costComp) costComp.costUsd = result.costUsd ?? 0;
+      const logComp = getComponent(n, AiLog);
+      if (logComp) logComp.entries = result.logEntries;
+    });
+
+    // Save sessionId to ai.chat
     await updateNode(store, agentNode.$path, (n) => {
-      const cfg = getComponent(n, MetatronConfig);
-      if (cfg) cfg.sessionId = result.sessionId ?? '';
+      const c = getComponent(n, AiChat);
+      if (c) c.sessionId = result.sessionId ?? '';
     });
 
     // Save plan as ai.plan component on the task
@@ -440,6 +507,12 @@ async function planAgent(
     const msg = err instanceof Error ? err.message : String(err);
     log.error(`plan: ${role} FAILED on ${taskNode.$path}:`, err);
 
+    await updateNode(store, runPath, (n) => {
+      n.result = `Plan error: ${msg}`;
+      const statusComp = getComponent(n, AiRunStatus);
+      if (statusComp) { statusComp.status = 'error'; statusComp.finishedAt = Date.now(); statusComp.error = msg; }
+    });
+
     await updateNode(store, taskNode.$path, (n) => {
       n.aiStatus = '❌ plan failed';
       n.result = `Plan error: ${msg}`;
@@ -449,7 +522,7 @@ async function planAgent(
     await updateComp(store, agentNode.$path, AiAgent, (c) => {
       c.status = 'idle';
       c.currentTask = '';
-      c.taskRef = '';
+      c.currentRun = '';
     });
 
     await updateComp(store, poolPath, AiPool, (c) => {
@@ -482,12 +555,49 @@ register('ai.pool', 'service', async (node: NodeData, ctx: ServiceCtx) => {
     return items.filter(n => n.$type === 'ai.agent');
   }
 
-  /** Build a map of role → idle agents (dynamic, no hardcoded roles) */
+  /** Collect org.post nodes that have ai.agent components */
+  async function getOrgAgents(): Promise<NodeData[]> {
+    const orgPosts: NodeData[] = [];
+    try {
+      const orgNode = await ctx.tree.get('/org');
+      if (!orgNode) return orgPosts;
+      const { items: divisions } = await ctx.tree.getChildren('/org');
+      for (const div of divisions) {
+        if (div.$type !== 'org.division') continue;
+        const { items: posts } = await ctx.tree.getChildren(div.$path);
+        for (const post of posts) {
+          if (post.$type === 'org.post' && getComponent(post, AiAgent)) orgPosts.push(post);
+        }
+      }
+    } catch {
+      // org tree may not exist
+    }
+    return orgPosts;
+  }
+
+  /** Resolve org.run component on a task (duck-typed, no org import) */
+  function getOrgRun(task: NodeData): { postRef: string; scope: string[] } | null {
+    for (const k of Object.keys(task)) {
+      const v = task[k];
+      if (v && typeof v === 'object' && '$type' in v && (v as ComponentData).$type === 'org.run') {
+        const run = v as Record<string, unknown>;
+        if (typeof run.postRef === 'string' && run.postRef) {
+          return { postRef: run.postRef, scope: Array.isArray(run.scope) ? run.scope as string[] : [] };
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Build a map of role → idle agents (dynamic, no hardcoded roles).
+   *  Discovers agents both under /agents and on org.post nodes. */
   async function buildRoleIndex(): Promise<Map<string, NodeData[]>> {
     const agents = await getAgents();
+    const orgAgents = await getOrgAgents();
+    const all = [...agents, ...orgAgents];
     const index = new Map<string, NodeData[]>();
 
-    for (const a of agents) {
+    for (const a of all) {
       const comp = getComponent(a, AiAgent);
       if (!comp || comp.status !== 'idle') continue;
       const list = index.get(comp.role) ?? [];
@@ -547,9 +657,33 @@ register('ai.pool', 'service', async (node: NodeData, ctx: ServiceCtx) => {
           }
         }
 
-        // ── Work mode: assignee + status=todo ──
-        if (task.status === 'todo' && typeof task.assignee === 'string') {
-          const role = task.assignee as string;
+        // ── Work mode: status=todo, route by org.run.postRef or assignee ──
+        if (task.status !== 'todo') continue;
+
+        // Resolve role: org.run.postRef takes priority over assignee
+        const orgRun = getOrgRun(task);
+        let role: string | undefined;
+        let targetAgentPath: string | undefined;
+
+        if (orgRun) {
+          // org.run routing: resolve postRef → post node → ai.agent → role
+          try {
+            const postNode = await ctx.tree.get(orgRun.postRef);
+            if (postNode) {
+              const postAgent = getComponent(postNode, AiAgent);
+              if (postAgent) {
+                role = postAgent.role;
+                targetAgentPath = postNode.$path;
+              }
+            }
+          } catch { /* post not found — fall through to assignee */ }
+        }
+
+        if (!role && typeof task.assignee === 'string') {
+          role = task.assignee as string;
+        }
+
+        if (role) {
 
           // Plan mode: check if task has an approved plan
           const plan = getComponent(task, AiPlan);
@@ -563,13 +697,21 @@ register('ai.pool', 'service', async (node: NodeData, ctx: ServiceCtx) => {
           const idleAgents = roleIndex.get(role);
           if (!idleAgents?.length) continue;
 
-          const agent = idleAgents[0];
+          // org.run targets a specific post agent; otherwise take first idle
+          let agentIdx = 0;
+          if (targetAgentPath) {
+            const idx = idleAgents.findIndex(a => a.$path === targetAgentPath);
+            if (idx < 0) continue; // target agent not idle
+            agentIdx = idx;
+          }
+
+          const agent = idleAgents[agentIdx];
           if (!poolAcquire(pool, agent.$path)) {
             log.warn(`pool full, ${agent.$path} queued`);
             continue;
           }
           poolDirty = true;
-          idleAgents.shift();
+          idleAgents.splice(agentIdx, 1);
 
           const readyAgent = await updateComp(ctx.tree, agent.$path, AiAgent, (c) => {
             c.status = 'working';
