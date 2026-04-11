@@ -8,7 +8,8 @@
     },
     "asType": {
       "type": "string",
-      "title": "Override type @description photo, document, video, audio, voice",
+      "title": "Override type",
+      "description": "photo, document, video, audio, voice",
       "default": ""
     }
   },

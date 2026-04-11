@@ -3,7 +3,8 @@
   "properties": {
     "text": {
       "type": "object",
-      "title": "Text @format tstring",
+      "title": "Text",
+      "format": "tstring",
       "default": {}
     },
     "disableLinks": {
@@ -81,12 +82,14 @@
     },
     "chatId": {
       "type": "string",
-      "title": "Send to chat ID @description Leave empty for current chat",
+      "title": "Send to chat ID",
+      "description": "Leave empty for current chat",
       "default": ""
     },
     "replyToMsgId": {
       "type": "string",
-      "title": "Reply to message ID @description Session field with message ID",
+      "title": "Reply to message ID",
+      "description": "Session field with message ID",
       "default": ""
     }
   },

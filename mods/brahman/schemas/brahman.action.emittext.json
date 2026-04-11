@@ -3,7 +3,9 @@
   "properties": {
     "from": {
       "type": "string",
-      "title": "Text template @format textarea @description Template for text to re-process",
+      "title": "Text template",
+      "format": "textarea",
+      "description": "Template for text to re-process",
       "default": ""
     }
   },

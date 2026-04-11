@@ -3,12 +3,14 @@
   "properties": {
     "msgIdFrom": {
       "type": "string",
-      "title": "Message ID from @description Session field with msg id. Empty = current msg",
+      "title": "Message ID from",
+      "description": "Session field with msg id. Empty = current msg",
       "default": ""
     },
     "toFrom": {
       "type": "string",
-      "title": "Forward to @description Chat/user ID template",
+      "title": "Forward to",
+      "description": "Chat/user ID template",
       "default": ""
     }
   },

@@ -3,7 +3,8 @@
   "properties": {
     "text": {
       "type": "object",
-      "title": "Text @format tstring",
+      "title": "Text",
+      "format": "tstring",
       "default": {}
     }
   },

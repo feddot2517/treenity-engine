@@ -16,7 +16,8 @@
       "items": {
         "type": "string"
       },
-      "title": "Parameter names @format tags",
+      "title": "Parameter names",
+      "format": "tags",
       "default": []
     }
   },

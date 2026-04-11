@@ -6,12 +6,14 @@
       "items": {
         "type": "string"
       },
-      "title": "User tags filter @format tags",
+      "title": "User tags filter",
+      "format": "tags",
       "default": []
     },
     "action": {
       "type": "string",
-      "title": "Action to broadcast @description Path to action node",
+      "title": "Action to broadcast",
+      "description": "Path to action node",
       "default": ""
     }
   },

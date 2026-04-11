@@ -3,7 +3,9 @@
   "properties": {
     "value": {
       "type": "string",
-      "title": "JavaScript code @format textarea @description Async function body, receives ctx object",
+      "title": "JavaScript code",
+      "format": "textarea",
+      "description": "Async function body, receives ctx object",
       "default": ""
     }
   },

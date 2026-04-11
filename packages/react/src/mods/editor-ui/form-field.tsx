@@ -9,10 +9,12 @@ export function renderField(
   name: string,
   fieldSchema: {
     type: string;
+    format?: string;
     label: string;
     placeholder?: string;
     readOnly?: boolean;
-    enum?: string[];
+    enum?: (string | number)[];
+    enumNames?: string[];
     items?: { type?: string; properties?: Record<string, unknown> };
     refType?: string;
   },
@@ -26,9 +28,7 @@ export function renderField(
 
   // If value is a $ref/$map, show ref editor instead of the normal field handler
   if (isRefValue) {
-    const onFieldChange = fieldSchema.readOnly
-      ? undefined
-      : (next: unknown) => set(name, next);
+    const onFieldChange = fieldSchema.readOnly ? undefined : (next: unknown) => set(name, next);
     return (
       <div key={name} className="field">
         <FieldLabel label={fieldSchema.label} value={rawValue} onChange={onFieldChange} />
@@ -39,25 +39,36 @@ export function renderField(
     );
   }
 
+  // Resolve handler: try format first (specific widget), fall back to base type,
+  // then to a generic 'string' handler. This keeps unknown formats from masking
+  // the underlying structural type.
   const ctx = fieldSchema.readOnly ? 'react:compact' : 'react:form';
-  const handler = fieldSchema.readOnly
-    ? (resolveExact(fieldSchema.type, 'react:compact') ?? resolveExact(fieldSchema.type, 'react'))
-    : (resolveExact(fieldSchema.type, ctx) ?? resolveExact('string', ctx));
+  const altCtx = fieldSchema.readOnly ? 'react' : ctx;
+  const tryResolve = (t: string) =>
+    fieldSchema.readOnly
+      ? (resolveExact(t, 'react:compact') ?? resolveExact(t, 'react'))
+      : resolveExact(t, ctx);
+  const resolvedType =
+    (fieldSchema.format && tryResolve(fieldSchema.format) ? fieldSchema.format : null) ??
+    (tryResolve(fieldSchema.type) ? fieldSchema.type : null) ??
+    'string';
+  const handler = tryResolve(resolvedType) ?? resolveExact('string', altCtx);
   if (!handler)
     return (
       <div key={name} className="text-destructive text-xs">
-        No form handler: {fieldSchema.type}
+        No form handler: {fieldSchema.format ?? fieldSchema.type}
       </div>
     );
 
   const fieldData: { $type: string; [k: string]: unknown } = {
-    $type: fieldSchema.type,
+    $type: resolvedType,
     value: rawValue,
     label: fieldSchema.label,
     placeholder: fieldSchema.placeholder,
   };
   if (fieldSchema.items) fieldData.items = fieldSchema.items;
   if (fieldSchema.enum) fieldData.enum = fieldSchema.enum;
+  if (fieldSchema.enumNames) fieldData.enumNames = fieldSchema.enumNames;
   if (fieldSchema.refType) fieldData.refType = fieldSchema.refType;
 
   const isComplex = fieldSchema.type === 'object' || fieldSchema.type === 'array';

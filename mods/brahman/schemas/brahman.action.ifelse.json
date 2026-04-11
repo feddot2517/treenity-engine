@@ -3,12 +3,15 @@
   "properties": {
     "condition": {
       "type": "string",
-      "title": "Condition @format textarea @description JS expression evaluated at runtime",
+      "title": "Condition",
+      "format": "textarea",
+      "description": "JS expression evaluated at runtime",
       "default": ""
     },
     "actionIf": {
       "type": "string",
-      "title": "Action if true @description Path to action node",
+      "title": "Action if true",
+      "description": "Path to action node",
       "default": ""
     },
     "actionElse": {

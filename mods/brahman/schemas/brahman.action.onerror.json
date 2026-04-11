@@ -3,12 +3,14 @@
   "properties": {
     "error": {
       "type": "string",
-      "title": "Error text @description Substring to match in error message",
+      "title": "Error text",
+      "description": "Substring to match in error message",
       "default": ""
     },
     "action": {
       "type": "string",
-      "title": "Action path @description Path to action node to run",
+      "title": "Action path",
+      "description": "Path to action node to run",
       "default": ""
     }
   },

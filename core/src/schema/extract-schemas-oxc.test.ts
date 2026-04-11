@@ -6,22 +6,34 @@ import { generateSchemas } from '#schema/extract-schemas-oxc';
 
 const SCHEMAS_DIR = path.resolve(import.meta.dirname, 'schemas');
 const SCHEMA_FILE = path.join(SCHEMAS_DIR, 'test.schema-widget.json');
+const IMPORT_FIXTURES_DIR = path.resolve(import.meta.dirname, '_import-fixtures');
+const IMPORT_SCHEMAS_DIR = path.join(IMPORT_FIXTURES_DIR, 'schemas');
 
 describe('extract-schemas-oxc', () => {
   let schema: any;
+  let alphaSchema: any;
+  let betaSchema: any;
 
   before(async () => {
-    // Clean previous test artifact
+    // Clean previous test artifacts
     await fs.rm(SCHEMA_FILE, { force: true });
+    await fs.rm(IMPORT_SCHEMAS_DIR, { recursive: true, force: true });
 
     // Generate from fixture
     await generateSchemas([import.meta.dirname]);
 
     schema = JSON.parse(await fs.readFile(SCHEMA_FILE, 'utf-8'));
+    alphaSchema = JSON.parse(
+      await fs.readFile(path.join(IMPORT_SCHEMAS_DIR, 'test.import-collision-alpha.json'), 'utf-8'),
+    );
+    betaSchema = JSON.parse(
+      await fs.readFile(path.join(IMPORT_SCHEMAS_DIR, 'test.import-collision-beta.json'), 'utf-8'),
+    );
   });
 
   after(async () => {
     await fs.rm(SCHEMA_FILE, { force: true });
+    await fs.rm(IMPORT_SCHEMAS_DIR, { recursive: true, force: true });
   });
 
   it('sets $id and $schema', () => {
@@ -65,13 +77,64 @@ describe('extract-schemas-oxc', () => {
 
   it('string union → enum', () => {
     assert.deepEqual(schema.properties.status, {
-      type: 'string', enum: ['draft', 'active', 'archived'], default: 'draft',
+      type: 'string',
+      enum: ['draft', 'active', 'archived'],
+      default: 'draft',
     });
   });
 
   it('string union with 3 values', () => {
     assert.deepEqual(schema.properties.priority, {
-      type: 'string', enum: ['low', 'medium', 'high'], default: 'medium',
+      type: 'string',
+      enum: ['low', 'medium', 'high'],
+      default: 'medium',
+    });
+  });
+
+  it('numeric literal union → number enum (not anyOf)', () => {
+    assert.deepEqual(schema.properties.trustLevel, {
+      type: 'number',
+      enum: [0, 1, 2, 3, 4],
+      default: 2,
+    });
+  });
+
+  // ── TS enum declarations ──
+
+  it('numeric enum (auto-increment) → number + enumNames labels', () => {
+    assert.deepEqual(schema.properties.level, {
+      type: 'number',
+      enum: [0, 1, 2],
+      enumNames: ['Low', 'Medium', 'High'],
+      default: 1,
+    });
+  });
+
+  it('numeric enum with explicit start → continues from initializer', () => {
+    assert.deepEqual(schema.properties.rank, {
+      type: 'number',
+      enum: [1, 2, 3],
+      enumNames: ['First', 'Second', 'Third'],
+      default: 1,
+    });
+  });
+
+  it('string enum where member names match values → omits enumNames', () => {
+    // `enum Color { red = 'red', green = 'green', blue = 'blue' }`
+    assert.deepEqual(schema.properties.color, {
+      type: 'string',
+      enum: ['red', 'green', 'blue'],
+      default: 'red',
+    });
+  });
+
+  it('string enum where member names differ from values → adds enumNames', () => {
+    // `enum Direction { North = 'N', South = 'S', East = 'E', West = 'W' }`
+    assert.deepEqual(schema.properties.direction, {
+      type: 'string',
+      enum: ['N', 'S', 'E', 'W'],
+      enumNames: ['North', 'South', 'East', 'West'],
+      default: 'N',
     });
   });
 
@@ -79,13 +142,17 @@ describe('extract-schemas-oxc', () => {
 
   it('typed array string[]', () => {
     assert.deepEqual(schema.properties.tags, {
-      type: 'array', items: { type: 'string' }, default: [],
+      type: 'array',
+      items: { type: 'string' },
+      default: [],
     });
   });
 
   it('typed array number[]', () => {
     assert.deepEqual(schema.properties.scores, {
-      type: 'array', items: { type: 'number' }, default: [],
+      type: 'array',
+      items: { type: 'number' },
+      default: [],
     });
   });
 
@@ -98,7 +165,9 @@ describe('extract-schemas-oxc', () => {
 
   it('Array<T> generic syntax', () => {
     assert.deepEqual(schema.properties.history, {
-      type: 'array', items: { type: 'string' }, default: [],
+      type: 'array',
+      items: { type: 'string' },
+      default: [],
     });
   });
 
@@ -106,7 +175,9 @@ describe('extract-schemas-oxc', () => {
     const p = schema.properties.changelog;
     assert.equal(p.type, 'array');
     assert.deepEqual(p.items.properties, {
-      action: { type: 'string' }, actor: { type: 'string' }, ts: { type: 'number' },
+      action: { type: 'string' },
+      actor: { type: 'string' },
+      ts: { type: 'number' },
     });
     assert.deepEqual(p.items.required, ['action', 'actor', 'ts']);
   });
@@ -133,7 +204,8 @@ describe('extract-schemas-oxc', () => {
     const c = schema.properties.config;
     assert.equal(c.type, 'object');
     assert.deepEqual(c.properties.nested, {
-      type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' } },
+      type: 'object',
+      properties: { x: { type: 'number' }, y: { type: 'number' } },
       required: ['x', 'y'],
     });
     assert.deepEqual(c.default, { color: 'blue', opacity: 1, nested: { x: 0, y: 0 } });
@@ -165,9 +237,7 @@ describe('extract-schemas-oxc', () => {
   // ── Mixed union → anyOf ──
 
   it('string | number → anyOf', () => {
-    assert.deepEqual(schema.properties.value.anyOf, [
-      { type: 'string' }, { type: 'number' },
-    ]);
+    assert.deepEqual(schema.properties.value.anyOf, [{ type: 'string' }, { type: 'number' }]);
   });
 
   // ── bigint ──
@@ -238,6 +308,17 @@ describe('extract-schemas-oxc', () => {
     assert.equal(schema.properties.apiKey.format, 'password');
   });
 
+  it('multiple tags on one line: @title + @description', () => {
+    // Regression: parser used to greedily consume the whole line into the first tag,
+    // yielding title = "Display Name @description The human-readable name shown in UI"
+    // and no description at all.
+    assert.equal(schema.properties.displayName.title, 'Display Name');
+    assert.equal(
+      schema.properties.displayName.description,
+      'The human-readable name shown in UI',
+    );
+  });
+
   // ── Methods ──
 
   it('method with no args', () => {
@@ -301,6 +382,43 @@ describe('extract-schemas-oxc', () => {
     }
   });
 
+  // ── Cross-file type imports (with name collision) ──
+
+  it('resolves imported type alias across files', () => {
+    // Both widgets import `Entry` from different files — regression for
+    // f1135ce which broke cross-file resolution by scoping aliases per file.
+    assert.equal(alphaSchema.properties.entries.type, 'array');
+    assert.equal(alphaSchema.properties.entries.items.type, 'object');
+    assert.deepEqual(alphaSchema.properties.entries.items.properties, {
+      kind: { type: 'string', enum: ['alpha'] },
+      count: { type: 'number' },
+    });
+  });
+
+  it('same-name type in different files resolves independently (no collision)', () => {
+    assert.equal(betaSchema.properties.entries.type, 'array');
+    assert.equal(betaSchema.properties.entries.items.type, 'object');
+    assert.deepEqual(betaSchema.properties.entries.items.properties, {
+      label: { type: 'string' },
+      active: { type: 'boolean' },
+    });
+    // Neither widget should leak the other's shape.
+    assert.ok(!('kind' in betaSchema.properties.entries.items.properties));
+    assert.ok(!('label' in alphaSchema.properties.entries.items.properties));
+  });
+
+  it('cross-file enum import: type + Enum.Member default both resolve', () => {
+    // `mode: Mode = Mode.Fast` where Mode is imported from entries-beta.ts.
+    // Exercises lookupType() for the TSTypeReference and resolveEnum() for
+    // the default value expression.
+    assert.deepEqual(alphaSchema.properties.mode, {
+      type: 'number',
+      enum: [0, 1, 2],
+      enumNames: ['Normal', 'Fast', 'Slow'],
+      default: 1,
+    });
+  });
+
   // ── Incremental: second run is no-op ──
 
   it('second run produces identical output', async () => {
@@ -308,7 +426,7 @@ describe('extract-schemas-oxc', () => {
     const stat1 = await fs.stat(SCHEMA_FILE);
 
     // Small delay so mtime would differ if file were rewritten
-    await new Promise(r => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 50));
     await generateSchemas([import.meta.dirname]);
 
     const after = await fs.readFile(SCHEMA_FILE, 'utf-8');

@@ -3,7 +3,8 @@
   "properties": {
     "targetPage": {
       "type": "string",
-      "title": "Target page @description Path to page node",
+      "title": "Target page",
+      "description": "Path to page node",
       "default": ""
     }
   },
