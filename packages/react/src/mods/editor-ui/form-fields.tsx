@@ -228,7 +228,12 @@ function BooleanForm({ value, onChange }: FP) {
         checked={!!value.value}
         onCheckedChange={(checked) => onChange?.({ ...value, value: checked })}
       />
-      <span className="text-xs text-muted-foreground">{value.label}</span>
+      <span
+        className="text-xs text-muted-foreground overflow-hidden text-ellipsis"
+        title={value.label}
+      >
+        {value.label}
+      </span>
     </label>
   );
 }
@@ -876,7 +881,7 @@ export function MiniTree({ onSelect }: { onSelect: (path: string) => void }) {
   async function fetchChildren(path: string) {
     if (loaded.has(path)) return;
     const { items } = await clientStore.getChildren(path);
-    cache.putMany(items, path);
+    cache.replaceChildren(path, items);
     setLoaded((prev) => new Set(prev).add(path));
   }
 

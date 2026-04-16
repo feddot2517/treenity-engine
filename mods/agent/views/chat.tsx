@@ -2,7 +2,7 @@
 // Registered on ai.chat component. Streams via trpc.streamAction.subscribe.
 
 import { register } from '@treenity/core';
-import { cn, trpc, useActions, useCurrentNode, usePath, type View } from '@treenity/react';
+import { cn, execute, trpc, useActions, useCurrentNode, usePath, type View } from '@treenity/react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AiChat, AiThread, type ThreadMessage } from '../types';
 import { LogRenderer } from './log';
@@ -10,7 +10,7 @@ import { LogRenderer } from './log';
 const ChatView: View<AiChat> = ({ value }) => {
   const node = useCurrentNode();
   const path = node.$path;
-  const thread = usePath(path, AiThread, 'thread');
+  const { data: thread } = usePath(path, AiThread, 'thread');
   const messages: ThreadMessage[] = thread?.messages ?? [];
 
   const [input, setInput] = useState('');
@@ -70,7 +70,7 @@ const ChatView: View<AiChat> = ({ value }) => {
   const stop = useCallback(() => {
     unsubRef.current?.();
     unsubRef.current = null;
-    actions.stop();
+    execute(path, 'stop');
     setStreaming(false);
     setStreamText('');
   }, [actions]);

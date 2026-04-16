@@ -13,7 +13,7 @@ import {
 } from '@dnd-kit/core';
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { type NodeData, register } from '@treenity/core';
+import { isOfType, type NodeData, register } from '@treenity/core';
 import { Render, RenderContext, useActions, useDraft, type View } from '@treenity/react';
 import { createNode, execute, removeNode, useChildren, useNavigate, usePath } from '@treenity/react';
 import { usePathSave } from '@treenity/react';
@@ -239,8 +239,8 @@ function ResultField({ path, result, onSave }: { path: string; result: string; o
 }
 
 function EmbeddedTaskLog({ taskRef }: { taskRef: string }) {
-  const mtTask = usePath(taskRef || null) as NodeData | undefined;
-  if (!mtTask || mtTask.$type === 'board.task') return null;
+  const { data: mtTask } = usePath(taskRef || null);
+  if (!mtTask || isOfType(mtTask, BoardTask)) return null;
 
   return (
     <div className="mt-2 rounded-md border border-border p-2">
@@ -331,7 +331,7 @@ function BlurInput({ value, onSave, ...props }: {
 // ── Task card (kanban) ──
 
 function TaskCardContent({ task, isDragging }: { task: NodeData; isDragging?: boolean }) {
-  const proxy = usePath(task.$path, BoardTask);
+  const { data: proxy } = usePath(task.$path, BoardTask);
 
   const title = typeof proxy?.title === 'string' && proxy.title
     ? proxy.title
@@ -373,7 +373,7 @@ function TaskCardContent({ task, isDragging }: { task: NodeData; isDragging?: bo
 }
 
 function TaskCard({ task, onSelect, colStatus }: { task: NodeData; onSelect: (path: string) => void; colStatus: string }) {
-  const proxy = usePath(task.$path, BoardTask);
+  const { data: proxy } = usePath(task.$path, BoardTask);
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.$path,
     data: { task, status: colStatus },
@@ -404,7 +404,7 @@ type ColumnExtra = { onSelect: (path: string) => void; onCreate: (status: string
 
 const KanbanColumn: View<BoardColumn, ColumnExtra> = ({ value, onChange, ctx, onSelect, onCreate }) => {
   const path = ctx!.node.$path;
-  const tasks = useChildren(path, { watch: true, watchNew: true });
+  const { data: tasks } = useChildren(path, { watch: true, watchNew: true });
   const status = path.split('/').at(-1) ?? '';
   const { setNodeRef, isOver } = useDroppable({ id: `col:${status}`, data: { status } });
 
@@ -507,7 +507,7 @@ const KanbanView: View<BoardKanban> = ({ value, ctx }) => {
   const [selectedTask, setSelectedTask] = useState<string | null>(null);
   const draft = useDraft('board.task');
   const [activeTask, setActiveTask] = useState<NodeData | null>(null);
-  const selectedNode = usePath(selectedTask ?? '') as NodeData | undefined;
+  const { data: selectedNode } = usePath(selectedTask || null);
   const basePath = ctx!.path;
   const saves = usePathSave();
 
@@ -531,7 +531,7 @@ const KanbanView: View<BoardKanban> = ({ value, ctx }) => {
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
   );
 
-  const children = useChildren(basePath, { watch: true, watchNew: true });
+  const { data: children } = useChildren(basePath, { watch: true, watchNew: true });
   const columns = children
     .filter(c => c.$type === 'board.column')
     .sort((a, b) => {
@@ -637,7 +637,7 @@ register('board.kanban', 'react', KanbanView);
 
 const ColumnView: View<BoardColumn> = ({ value, ctx }) => {
   const path = ctx?.node?.$path ?? '';
-  const tasks = useChildren(path, { watch: true, watchNew: true });
+  const { data: tasks } = useChildren(path, { watch: true, watchNew: true });
   const label = value.label || path.split('/').at(-1);
   const color = value.color || 'border-zinc-400';
 
