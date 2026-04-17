@@ -14,6 +14,7 @@ import {
   stripComponents,
   withAcl,
 } from './auth';
+import { OpError } from '#errors';
 
 let tree: Tree;
 
@@ -500,5 +501,52 @@ describe('getChildren truncation', () => {
     const result = await s.getChildren('/small');
     assert.equal(result.truncated, undefined);
     assert.equal(result.items.length, 2);
+  });
+});
+
+describe('buildClaims — groups from user record', () => {
+  it('includes authenticated + u:<id> + user groups list', async () => {
+    await tree.set({
+      ...createNode('/auth/users/carol', 'user'),
+      $owner: 'carol',
+      groups: { $type: 'groups', list: ['editors', 'reviewers'] },
+    });
+    const claims = await buildClaims(tree, 'carol');
+    assert.ok(claims.includes('u:carol'), 'u:carol present');
+    assert.ok(claims.includes('authenticated'), 'authenticated present');
+    assert.ok(claims.includes('editors'), 'editors group present');
+    assert.ok(claims.includes('reviewers'), 'reviewers group present');
+  });
+
+  it('anon:* users get public group, never authenticated', async () => {
+    const claims = await buildClaims(tree, 'anon:abc123');
+    assert.ok(claims.includes('public'));
+    assert.ok(!claims.includes('authenticated'));
+  });
+});
+
+describe('withAcl denial — typed OpError', () => {
+  it('set without W throws OpError with code FORBIDDEN', async () => {
+    const s = withAcl(tree, 'bob', ['u:bob', 'authenticated']);
+    await assert.rejects(
+      () => s.set(createNode('/users/alice/page', 'page', { title: 'hijacked' })),
+      (e: unknown) => e instanceof OpError && e.code === 'FORBIDDEN',
+    );
+  });
+
+  it('remove without W throws OpError with code FORBIDDEN', async () => {
+    const s = withAcl(tree, 'bob', ['u:bob', 'authenticated']);
+    await assert.rejects(
+      () => s.remove('/users/alice/page'),
+      (e: unknown) => e instanceof OpError && e.code === 'FORBIDDEN',
+    );
+  });
+
+  it('patch without W throws OpError with code FORBIDDEN', async () => {
+    const s = withAcl(tree, 'bob', ['u:bob', 'authenticated']);
+    await assert.rejects(
+      () => s.patch('/users/alice/page', [['r', 'title', 'hijacked']]),
+      (e: unknown) => e instanceof OpError && e.code === 'FORBIDDEN',
+    );
   });
 });

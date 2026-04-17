@@ -8,7 +8,8 @@ import { createTreeP } from '#protocol/treep';
 import type { Tree } from '#tree';
 import { initTRPC, TRPCError } from '@trpc/server';
 import { observable } from '@trpc/server/observable';
-// TS2742: declaration emit needs access to internal trpc types
+// Pin @trpc/server internal types to a public subpath so declaration emit stays portable (TS2742).
+import type {} from '@trpc/server/unstable-core-do-not-import';
 import { z } from 'zod';
 import {
   type ActionCtx,
@@ -18,8 +19,8 @@ import {
   setComponent as setComponentOp,
 } from './actions';
 import { buildClaims, type Session, withAcl } from './auth';
-import { agentConnect, anonLogin, devLogin, loginUser, logoutUser, registerUser } from './auth-ops';
-import { OpError } from './errors';
+import { agentConnect, devLogin, loginUser, logoutUser, registerUser } from './auth-ops';
+import { OpError } from '#errors';
 import { deployPrefab as deployPrefabOp } from './prefab';
 import { type CdcRegistry, type NodeEvent } from './sub';
 import { extractPaths } from './volatile';
@@ -60,14 +61,8 @@ export function createTreeRouter(baseStore: Tree, watcher: WatchManager, opts?: 
   function mapErrors(result: { ok: boolean; error?: { cause?: unknown } }) {
     if (result.ok) return;
     const cause = result.error?.cause;
-    if (cause instanceof Error) {
-      if (cause.name === 'OpError')
-        throw new TRPCError({ code: (cause as OpError).code, message: cause.message });
-      if (cause.message.startsWith('Access denied'))
-        throw new TRPCError({ code: 'FORBIDDEN', message: cause.message });
-      if (cause.message.startsWith('OptimisticConcurrencyError'))
-        throw new TRPCError({ code: 'CONFLICT', message: cause.message });
-    }
+    if (cause instanceof OpError)
+      throw new TRPCError({ code: cause.code, message: cause.message });
   }
 
   const base = t.procedure.use(async ({ next }) => {
@@ -258,8 +253,6 @@ export function createTreeRouter(baseStore: Tree, watcher: WatchManager, opts?: 
           for (const p of input.paths) cdc?.unwatchQuery(p, ctx.session.userId);
         }
       }),
-
-    anonLogin: base.mutation(() => anonLogin(baseStore)),
 
     devLogin: base.mutation(() => devLogin(baseStore)),
 
